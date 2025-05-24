@@ -1,193 +1,219 @@
-from typing import Dict, Any
+from typing import Dict, Any, Optional, List
 import logging
 import os
+import json
+import time
+from database_config import DatabaseConfigManager
+from autogen_universal import UniversalNL2SQLOrchestrator
 
 logger = logging.getLogger(__name__)
 
 class DualSystemManager:
-    def __init__(self, db_path: str = "Chinook_Sqlite.sqlite"):
-        """
-        Initialize systems. LangChain initialization will be skipped.
+    """Enhanced system manager with universal multi-database support"""
+    
+    def __init__(self, initial_db_path: str = None):
+        self.config_manager = DatabaseConfigManager()
+        self.universal_orchestrator = UniversalNL2SQLOrchestrator(self.config_manager)
         
-        Args:
-            db_path: Path to database file
-        """
-        self.db_path = db_path
-        self.autogen_orchestrator = None
-        self.langchain_agent = None
+        # Initialize with database
+        if initial_db_path:
+            self.db_path = initial_db_path
+            # Add SQLite config if it doesn't exist
+            if initial_db_path.endswith('.sqlite'):
+                if not any(config['name'] == 'Current_SQLite' 
+                          for config in self.config_manager.list_configs()):
+                    from database_config import DatabaseConfig
+                    from datetime import datetime
+                    sqlite_config = DatabaseConfig(
+                        name="Current_SQLite",
+                        db_type="sqlite",
+                        connection_type="local",
+                        database=initial_db_path,
+                        created_at=datetime.now().isoformat(),
+                        is_active=True
+                    )
+                    self.config_manager.configs['Current_SQLite'] = sqlite_config
+                    self.config_manager._save_configs()
+                
+                # Connect to the database
+                self.universal_orchestrator.connect_to_database('Current_SQLite')
+        else:
+            # Use active configuration
+            active_config = self.config_manager.get_active_config()
+            if active_config:
+                self.db_path = active_config.database
+                self.universal_orchestrator.connect_to_database()
+            else:
+                self.db_path = "Chinook_Sqlite.sqlite"  # Fallback
         
-        self._init_autogen_system()
-        logger.info("LangChain system initialization is currently SKIPPED to focus on AutoGen.")
+        logger.info(f"DUAL SYSTEM MANAGER: Initialized with universal support for: {self.db_path}")
 
-    def _init_autogen_system(self):
-        """Initialize the existing AutoGen system."""
+    def process_query(self, query: str, system: str = "autogen") -> Dict[str, Any]:
+        """Process query using universal orchestrator"""
         try:
-            from autogen_iterative import IterativeNL2SQLOrchestrator
-            self.autogen_orchestrator = IterativeNL2SQLOrchestrator(self.db_path)
-            logger.info("✅ AutoGen system initialized successfully by DualSystemManager")
+            logger.info(f"DUAL SYSTEM: Processing query with {system}: '{query[:50]}...'")
+            
+            if system == "autogen":
+                # Use universal orchestrator
+                result = self.universal_orchestrator.process_query(query)
+                
+                # Add classification info for compatibility
+                result["classification"] = {
+                    "classification": result.get("intent", {}).get("intent_type", "data_query"),
+                    "confidence": 0.9 if result.get("success") else 0.5
+                }
+                
+                return result
+            else:
+                return {
+                    "success": False,
+                    "error": f"System '{system}' not supported. Use 'autogen' for universal database support.",
+                    "query": query
+                }
+        
         except Exception as e:
-            logger.error(f"❌ DualSystemManager: Failed to initialize AutoGen system: {e}", exc_info=True)
-            self.autogen_orchestrator = None
-
-    def _init_langchain_system(self):
-        """Initialize the new LangChain system. CURRENTLY DISABLED."""
-        logger.warning("LangChain system initialization is SKIPPED in the current configuration.")
-        self.langchain_agent = None
-        return
-
-    def process_query(self, query: str, system: str = "autogen", **kwargs) -> Dict[str, Any]:
-        """
-        Process query using specified system. LangChain will be ignored if chosen.
-        """
-        if system.lower() == "langchain":
-            logger.warning("LangChain was requested, but it is currently disabled. Returning error.")
+            logger.error(f"DUAL SYSTEM: Error processing query: {e}", exc_info=True)
             return {
-                'success': False,
-                'error': 'LangChain system is currently disabled. Please use AutoGen.',
-                'system': 'langchain_disabled',
-                'query': query
+                "success": False,
+                "error": f"System error: {str(e)}",
+                "query": query
             }
-        # The check for self.autogen_orchestrator is handled in _process_with_autogen
-        return self._process_with_autogen(query, **kwargs)
 
-    def _process_with_autogen(self, query: str, **kwargs) -> Dict[str, Any]:
-        logger.debug("DualSystemManager._process_with_autogen called.")
-        if not self.autogen_orchestrator:
-            return {
-                'success': False, 'error': 'AutoGen system not available',
-                'system': 'autogen', 'query': query
-            }
-        return self.autogen_orchestrator.process_query_iteratively(query, **kwargs)
-
-    def compare_systems(self, query: str) -> Dict[str, Any]:
-        """
-        Run the same query on AutoGen. LangChain part will show as disabled.
-        """
-        autogen_result = self._process_with_autogen(query) # Changed from self.process_query
-        langchain_result = { 
-            'success': False,
-            'error': 'LangChain system is currently disabled.',
-            'system': 'langchain_disabled',
-            'query': query
-        }
+    def get_system_status(self) -> Dict[str, Any]:
+        """Get status of all systems"""
+        # Test database connection
+        db_connected = self.universal_orchestrator.db_manager.adapter.is_connected()
+        
         return {
-            'query': query, 'autogen': autogen_result, 'langchain': langchain_result,
-            'comparison': {'both_successful': False, 'sql_match': False, 'result_count_match': False }
+            "autogen": {
+                "available": True,
+                "status": "Ready - Universal Multi-DB Support",
+                "database_connected": db_connected,
+                "current_database": self.db_path
+            },
+            "langchain": {
+                "available": False,
+                "status": "Disabled - Using Universal AutoGen"
+            }
         }
 
     def switch_database(self, new_db_path: str) -> Dict[str, Any]:
-        """
-        Switch to a different database and reinitialize AutoGen. LangChain remains disabled.
-        """
-        logger.info(f"DualSystemManager: Attempting to switch database to: {new_db_path}")
+        """Switch to a different database"""
         try:
-            validation = self.validate_database(new_db_path)
-            if not validation['valid']:
-                logger.error(f"Validation failed for new DB path {new_db_path}: {validation['error']}")
-                return {'success': False, 'error': validation['error'], 'validation': validation}
+            logger.info(f"DUAL SYSTEM: Switching database from {self.db_path} to {new_db_path}")
             
-            self.db_path = new_db_path
-            logger.info(f"Re-initializing AutoGen system for new database: {self.db_path}")
-            self._init_autogen_system() 
+            # Add new database configuration if needed
+            config_name = f"DB_{os.path.basename(new_db_path)}"
             
-            self.langchain_agent = None # Added as per guide
-            logger.info("LangChain remains disabled after database switch.") # Added as per guide
-
-            logger.info(f"✅ Database switched to {self.db_path}. AutoGen re-initialized. LangChain remains disabled.") # Updated log
-            return {'success': True, 'message': f'Database switched to {self.db_path}. AutoGen re-initialized. LangChain disabled.'}
+            if new_db_path.endswith('.sqlite'):
+                # Add SQLite configuration
+                from database_config import DatabaseConfig
+                from datetime import datetime
+                new_config = DatabaseConfig(
+                    name=config_name,
+                    db_type="sqlite",
+                    connection_type="local",
+                    database=new_db_path,
+                    created_at=datetime.now().isoformat(),
+                    is_active=True
+                )
+                self.config_manager.configs[config_name] = new_config
+                self.config_manager.set_active_config(config_name)
+                self.config_manager._save_configs()
+            
+            # Connect to new database
+            success = self.universal_orchestrator.connect_to_database(config_name)
+            
+            if success:
+                self.db_path = new_db_path
+                logger.info(f"DUAL SYSTEM: Successfully switched to {new_db_path}")
+                return {"success": True, "database": new_db_path}
+            else:
+                logger.error(f"DUAL SYSTEM: Failed to connect to {new_db_path}")
+                return {"success": False, "error": f"Failed to connect to {new_db_path}"}
+        
         except Exception as e:
-            logger.error(f"Database switch to {new_db_path} failed critically: {str(e)}", exc_info=True)
-            return {'success': False, 'error': f'Database switch failed: {str(e)}', 'validation': {'valid': False, 'error': str(e)}}
+            logger.error(f"DUAL SYSTEM: Error switching database: {e}", exc_info=True)
+            return {"success": False, "error": str(e)}
 
-    def get_system_status(self) -> Dict[str, Any]:
-        """Get status of both systems."""
-        return {
-            'autogen': {
-                'available': self.autogen_orchestrator is not None,
-                'status': 'ready' if self.autogen_orchestrator else 'AutoGen not initialized'
-            },
-            'langchain': {
-                'available': False, # Hardcode as false
-                'status': 'disabled'
-            },
-            'database': self.db_path
-        }
-
-    def cleanup(self):
-        logger.info("DualSystemManager cleanup called. Currently no specific cleanup for AutoGen here. LangChain is disabled.")
-        pass # LangChain agent is None
+    def get_available_databases(self) -> List[Dict[str, Any]]:
+        """Get list of available database configurations"""
+        databases = []
+        
+        # Get configured databases
+        for config in self.config_manager.list_configs():
+            databases.append({
+                "name": config["name"],
+                "display_name": f"{config['db_type'].upper()}: {config['database']}",
+                "type": config["db_type"],
+                "database": config["database"],
+                "is_active": config["is_active"]
+            })
+        
+        # Add any SQLite files in current directory
+        for file in os.listdir('.'):
+            if file.endswith('.sqlite') or file.endswith('.db'):
+                # Check if already in configs
+                if not any(db['database'] == file for db in databases):
+                    databases.append({
+                        "name": f"local_{file}",
+                        "display_name": f"SQLite: {file}",
+                        "type": "sqlite",
+                        "database": file,
+                        "is_active": False
+                    })
+        
+        return databases
 
     def validate_database(self, db_path: str) -> Dict[str, Any]:
-        logger.info(f"DualSystemManager.validate_database for {db_path}")
+        """Validate database connection and get metadata"""
         try:
-            # Ensure db_path is absolute or correctly relative to PROJECT_ROOT if not absolute
-            # This logic assumes db_path might be just a filename intended to be in PROJECT_ROOT
-            if not os.path.isabs(db_path) and not os.path.exists(db_path):
-                # This assumes system_manager.py is in app/ and db_path is relative to project root.
-                # To get to project_root from app/system_manager.py: os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                # However, simpler if db_path is consistently provided as absolute or relative to a known base.
-                # For now, let's assume db_path needs to be checked relative to where DBs are stored (e.g., project root)
-                # This path resolution should ideally be handled by the caller or consistently.
-                # If this script (system_manager.py) is in app/, and db_path is "Chinook_Sqlite.sqlite",
-                # we need to construct path from project root.
-                project_root_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) # Assuming app/system_manager.py
-                candidate_path = os.path.join(project_root_path, db_path)
-                if os.path.exists(candidate_path):
-                    db_path_to_check = candidate_path
-                    logger.info(f"Adjusted relative DB path to: {db_path_to_check}")
+            # Test connection using config manager
+            if db_path.endswith('.sqlite'):
+                # Create temporary config for validation
+                temp_config_name = f"temp_validate_{int(time.time())}"
+                from database_config import DatabaseConfig
+                from datetime import datetime
+                
+                temp_config = DatabaseConfig(
+                    name=temp_config_name,
+                    db_type="sqlite",
+                    connection_type="local",
+                    database=db_path,
+                    created_at=datetime.now().isoformat()
+                )
+                
+                self.config_manager.configs[temp_config_name] = temp_config
+                
+                # Test connection
+                success, message, metadata = self.config_manager.test_connection(temp_config_name)
+                
+                # Clean up temp config
+                del self.config_manager.configs[temp_config_name]
+                
+                if success:
+                    return {
+                        "valid": True,
+                        "database_path": db_path,
+                        "total_tables": metadata.get("table_count", 0),
+                        "size_mb": metadata.get("database_size_mb", 0),
+                        "sample_tables": [{"name": table, "rows": "N/A"} 
+                                        for table in metadata.get("tables", [])[:3]]
+                    }
                 else:
-                    db_path_to_check = db_path # proceed with original if not found relative to root
+                    return {"valid": False, "error": message}
             else:
-                db_path_to_check = db_path
-
-            if not os.path.exists(db_path_to_check):
-                logger.warning(f"Database file not found at: {db_path_to_check}")
-                return {'valid': False, 'error': f'Database file not found: {db_path_to_check}'}
-            
-            # Try to connect and get basic info
-            # This part should ideally use your existing database.py or db_connector if they have validation logic
-            # For simplicity here, direct sqlite3 connection for basic validation
-            import sqlite3 # Local import for this method
-            conn = sqlite3.connect(db_path_to_check)
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-            tables = [row[0] for row in cursor.fetchall()]
-            conn.close()
-            
-            return {
-                'valid': True, 
-                'database_path': db_path_to_check, # Return the path that was validated
-                'total_tables': len(tables),
-                'sample_tables': tables[:5], # Return first 5 table names as sample
-                'size_mb': round(os.path.getsize(db_path_to_check) / (1024*1024), 2)
-            }
+                return {"valid": False, "error": "Unsupported database type for validation"}
+                
         except Exception as e:
-            logger.error(f"Database validation for {db_path} failed: {e}", exc_info=True)
-            return {'valid': False, 'error': f'Validation failed: {str(e)}'}
+            logger.error(f"DUAL SYSTEM: Database validation error: {e}")
+            return {"valid": False, "error": str(e)}
 
-    def get_available_databases(self) -> list:
-        logger.info("DualSystemManager.get_available_databases called.")
-        databases = []
-        # Scan relative to where db_path is expected (e.g., project root)
-        # This assumes system_manager.py is in 'app' directory.
-        scan_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) 
+    def cleanup(self):
+        """Clean up resources"""
         try:
-            for file in os.listdir(scan_dir):
-                 if file.endswith(('.sqlite', '.db', '.sqlite3')):
-                    full_path = os.path.join(scan_dir, file)
-                    # Use the name relative to scan_dir (which should be project root) for consistency
-                    databases.append({'name': file, 
-                                      'display_name': os.path.splitext(file)[0].replace('_',' '), 
-                                      'validation': self.validate_database(full_path)}) # Validate with full path
+            if hasattr(self.universal_orchestrator, 'db_manager'):
+                self.universal_orchestrator.db_manager.adapter.close()
+            logger.info("DUAL SYSTEM: Cleanup completed")
         except Exception as e:
-            logger.error(f"Error scanning for databases in {scan_dir}: {e}")
-        
-        if not databases and os.path.exists(self.db_path):
-             logger.warning(f"No databases found by scanning {scan_dir}, adding current default: {self.db_path}")
-             databases.append({'name': os.path.basename(self.db_path), 
-                               'display_name': os.path.splitext(os.path.basename(self.db_path))[0].replace('_',' '), 
-                               'validation': self.validate_database(self.db_path)})
-        elif not databases:
-            logger.warning(f"No databases found by scanning {scan_dir} and default {self.db_path} also not found.")
-        
-        return databases 
+            logger.error(f"DUAL SYSTEM: Cleanup error: {e}") 
