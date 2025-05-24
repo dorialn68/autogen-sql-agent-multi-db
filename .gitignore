@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database files
+*.db
+*.sqlite3
+
+# Logs
+*.log
+
+# Embedded repositories
+db_gpt/
+
+# Node modules if any
+node_modules/
+
+# Large model files
+*.gguf
+*.bin
+*.safetensors
+
+# Environment files
+.env
+.env.local
+
+# Jupyter notebooks
+.ipynb_checkpoints/
+*.ipynb
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
